@@ -10,6 +10,9 @@ jobs:
   merge-production-to-staging:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
       # Checkout repository with full history
       - name: Checkout repository
@@ -20,8 +23,8 @@ jobs:
       # Setup Git user
       - name: Set up Git
         run: |
-          git config user.name "kooappsdevs"
-          git config user.email "devaccounts@kooapps.com"
+          git config user.name "shicai-kooapps"
+          git config user.email "146254365+shicai-kooapps@users.noreply.github.com"
 
       # Merge production into staging
       - name: Merge production into staging
