@@ -1,0 +1,40 @@
+name: Sync Production to Staging
+
+# Trigger on any push to phoenixcloud-production
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  merge-production-to-staging:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout repository with full history
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+  
+      # Setup Git user
+      - name: Set up Git
+        run: |
+          git config user.name "kooappsdevs"
+          git config user.email "devaccounts@kooapps.com"
+
+      # Merge production into staging
+      - name: Merge production into staging
+        run: |
+          # Fetch branch
+          git fetch origin staging
+
+          # Checkout staging branch
+          git checkout staging
+          git pull origin staging
+
+          # Merge production branch
+          git merge origin/main --no-ff -m "Automated merge from production to staging"
+
+          # Push back to remote
+          git push origin staging
