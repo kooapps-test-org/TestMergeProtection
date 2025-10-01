@@ -41,4 +41,4 @@ jobs:
 
           # Push back to remote
           git push origin staging
-          echo "{{github.actor}}"
+          echo ${{github.actor}}
