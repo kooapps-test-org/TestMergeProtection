@@ -1,0 +1,161 @@
+name: Merge Branches via GitHub API
+
+# Trigger on workflow_dispatch to allow manual triggering with parameters
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch to merge from'
+        required: true
+        default: 'main'
+      target_branch:
+        description: 'Target branch to merge into'
+        required: true
+        default: 'staging'
+      merge_method:
+        description: 'Merge method (merge, squash, rebase)'
+        required: true
+        default: 'merge'
+        type: choice
+        options:
+          - merge
+          - squash
+          - rebase
+      commit_title:
+        description: 'Custom commit title (optional)'
+        required: false
+      commit_message:
+        description: 'Custom commit message (optional)'
+        required: false
+
+jobs:
+  merge-branches:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Merge branches via GitHub API
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'staging' }}
+          MERGE_METHOD: ${{ github.event.inputs.merge_method || 'merge' }}
+          COMMIT_TITLE: ${{ github.event.inputs.commit_title || '' }}
+          COMMIT_MESSAGE: ${{ github.event.inputs.commit_message || '' }}
+        run: |
+          # Set default values if not provided
+          SOURCE_BRANCH=${SOURCE_BRANCH:-main}
+          TARGET_BRANCH=${TARGET_BRANCH:-staging}
+          MERGE_METHOD=${MERGE_METHOD:-merge}
+          
+          # Generate commit title and message if not provided
+          if [ -z "$COMMIT_TITLE" ]; then
+            COMMIT_TITLE="Merge $SOURCE_BRANCH into $TARGET_BRANCH"
+          fi
+          
+          if [ -z "$COMMIT_MESSAGE" ]; then
+            COMMIT_MESSAGE="Automated merge from $SOURCE_BRANCH to $TARGET_BRANCH via GitHub API"
+          fi
+          
+          echo "Merging $SOURCE_BRANCH into $TARGET_BRANCH using $MERGE_METHOD method..."
+          
+          # Make the merge request via GitHub API
+          response=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/merges" \
+            -d "{
+              \"base\": \"$TARGET_BRANCH\",
+              \"head\": \"$SOURCE_BRANCH\",
+              \"commit_message\": \"$COMMIT_MESSAGE\"
+            }")
+          
+          # Extract response body and status code
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status Code: $http_code"
+          echo "Response: $response_body"
+          
+          # Check if merge was successful
+          if [ "$http_code" = "201" ]; then
+            echo "✅ Successfully merged $SOURCE_BRANCH into $TARGET_BRANCH"
+            
+            # Extract and display merge commit SHA
+            merge_sha=$(echo "$response_body" | jq -r '.sha')
+            echo "Merge commit SHA: $merge_sha"
+            
+          elif [ "$http_code" = "204" ]; then
+            echo "ℹ️  No merge needed - $TARGET_BRANCH is already up to date with $SOURCE_BRANCH"
+            
+          elif [ "$http_code" = "409" ]; then
+            echo "❌ Merge conflict detected"
+            echo "$response_body" | jq -r '.message'
+            exit 1
+            
+          elif [ "$http_code" = "422" ]; then
+            echo "❌ Validation failed"
+            echo "$response_body" | jq -r '.message'
+            exit 1
+            
+          else
+            echo "❌ Merge failed with status code: $http_code"
+            echo "Response: $response_body"
+            exit 1
+          fi
+
+      - name: Create Pull Request (Alternative Method)
+        if: failure() && env.GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'staging' }}
+        run: |
+          echo "Direct merge failed, attempting to create a pull request instead..."
+          
+          # Check if PR already exists
+          existing_pr=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:$SOURCE_BRANCH&base=$TARGET_BRANCH&state=open")
+          
+          pr_count=$(echo "$existing_pr" | jq length)
+          
+          if [ "$pr_count" = "0" ]; then
+            echo "Creating pull request from $SOURCE_BRANCH to $TARGET_BRANCH..."
+            
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d "{
+                \"title\": \"Automated merge: $SOURCE_BRANCH → $TARGET_BRANCH\",
+                \"body\": \"This pull request was automatically created when direct merge failed.\n\nSource: $SOURCE_BRANCH\nTarget: $TARGET_BRANCH\n\nCreated by GitHub Actions workflow.\",
+                \"head\": \"$SOURCE_BRANCH\",
+                \"base\": \"$TARGET_BRANCH\"
+              }")
+            
+            pr_http_code=$(echo "$pr_response" | tail -n1)
+            pr_response_body=$(echo "$pr_response" | sed '$d')
+            
+            if [ "$pr_http_code" = "201" ]; then
+              pr_url=$(echo "$pr_response_body" | jq -r '.html_url')
+              echo "✅ Created pull request: $pr_url"
+            else
+              echo "❌ Failed to create pull request. Status: $pr_http_code"
+              echo "Response: $pr_response_body"
+            fi
+          else
+            echo "ℹ️  Pull request already exists between $SOURCE_BRANCH and $TARGET_BRANCH"
+          fi

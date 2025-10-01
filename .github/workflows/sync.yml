@@ -1,6 +1,6 @@
 name: Sync Production to Staging
 
-# Trigger on any push to phoenixcloud-production
+# Trigger on any push to main branch
 on:
   push:
     branches:
@@ -12,33 +12,86 @@ jobs:
 
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
-      # Checkout repository with full history
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-  
-      # Setup Git user
-      - name: Set up Git
+
+      - name: Merge production to staging via GitHub API
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
-          git config user.name "shicai-kooapps"
-          git config user.email "146254365+shicai-kooapps@users.noreply.github.com"
-
-      # Merge production into staging
-      - name: Merge production into staging
-        run: |
-          # Fetch branch
-          git fetch origin staging
-
-          # Checkout staging branch
-          git checkout staging
-          git pull origin staging
-
-          # Merge production branch
-          git merge origin/main --no-ff -m "Automated merge from production to staging"
-
-          # Push back to remote
-          git push origin staging
-          echo ${{github.actor}}
+          echo "Attempting to merge main into staging via GitHub API..."
+          
+          # Make the merge request via GitHub API
+          response=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/merges" \
+            -d "{
+              \"base\": \"staging\",
+              \"head\": \"main\",
+              \"commit_message\": \"Automated merge from production (main) to staging - triggered by push to main\"
+            }")
+          
+          # Extract response body and status code
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status Code: $http_code"
+          echo "Response: $response_body"
+          
+          # Check if merge was successful
+          if [ "$http_code" = "201" ]; then
+            echo "✅ Successfully merged main into staging"
+            
+            # Extract and display merge commit SHA
+            merge_sha=$(echo "$response_body" | jq -r '.sha')
+            echo "Merge commit SHA: $merge_sha"
+            
+          elif [ "$http_code" = "204" ]; then
+            echo "ℹ️  No merge needed - staging is already up to date with main"
+            
+          elif [ "$http_code" = "409" ]; then
+            echo "❌ Merge conflict detected"
+            echo "$response_body" | jq -r '.message'
+            echo "Creating pull request as fallback..."
+            
+            # Create a pull request as fallback
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.PERSONAL_ACCESS_TOKEN }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d "{
+                \"title\": \"Automated merge: main → staging (conflict detected)\",
+                \"body\": \"This pull request was automatically created due to merge conflicts when trying to merge main into staging.\n\n**Triggered by:** Push to main branch\n**Source:** main\n**Target:** staging\n\nPlease resolve conflicts and merge manually.\",
+                \"head\": \"main\",
+                \"base\": \"staging\"
+              }")
+            
+            pr_http_code=$(echo "$pr_response" | tail -n1)
+            pr_response_body=$(echo "$pr_response" | sed '$d')
+            
+            if [ "$pr_http_code" = "201" ]; then
+              pr_url=$(echo "$pr_response_body" | jq -r '.html_url')
+              echo "✅ Created pull request: $pr_url"
+            else
+              echo "❌ Failed to create pull request. Status: $pr_http_code"
+              exit 1
+            fi
+            
+          elif [ "$http_code" = "422" ]; then
+            echo "❌ Validation failed - branch may not exist or merge protection is enabled"
+            echo "$response_body" | jq -r '.message'
+            exit 1
+            
+          else
+            echo "❌ Merge failed with status code: $http_code"
+            echo "Response: $response_body"
+            exit 1
+          fi

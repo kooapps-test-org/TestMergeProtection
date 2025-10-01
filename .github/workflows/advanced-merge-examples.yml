@@ -1,0 +1,361 @@
+name: Advanced Branch Merge Examples
+
+# This workflow demonstrates various merge scenarios using GitHub REST API
+on:
+  workflow_dispatch:
+    inputs:
+      merge_type:
+        description: 'Type of merge to perform'
+        required: true
+        default: 'simple'
+        type: choice
+        options:
+          - simple
+          - multi-branch
+          - with-protection
+          - batch-merge
+          - conditional-merge
+
+jobs:
+  # Example 1: Simple branch merge
+  simple-merge:
+    if: github.event.inputs.merge_type == 'simple'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Simple Branch Merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Simple Branch Merge Example ==="
+          
+          # Merge feature branch into main
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/merges" \
+            -d '{
+              "base": "main",
+              "head": "feature-branch",
+              "commit_message": "Merge feature branch into main"
+            }' | jq '.'
+
+  # Example 2: Multi-branch merge (merge multiple branches)
+  multi-branch-merge:
+    if: github.event.inputs.merge_type == 'multi-branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Multi-Branch Merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Multi-Branch Merge Example ==="
+          
+          # Define branches to merge
+          branches=("feature-1" "feature-2" "hotfix-1")
+          
+          for branch in "${branches[@]}"; do
+            echo "Merging $branch into staging..."
+            
+            response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/merges" \
+              -d "{
+                \"base\": \"staging\",
+                \"head\": \"$branch\",
+                \"commit_message\": \"Automated merge: $branch → staging\"
+              }")
+            
+            http_code=$(echo "$response" | tail -n1)
+            response_body=$(echo "$response" | sed '$d')
+            
+            if [ "$http_code" = "201" ]; then
+              echo "✅ Successfully merged $branch"
+            elif [ "$http_code" = "204" ]; then
+              echo "ℹ️  $branch already up to date"
+            else
+              echo "❌ Failed to merge $branch: $http_code"
+              echo "$response_body"
+            fi
+          done
+
+  # Example 3: Merge with branch protection handling
+  merge-with-protection:
+    if: github.event.inputs.merge_type == 'with-protection'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Merge with Protection Handling
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Merge with Branch Protection Handling ==="
+          
+          # First, try direct merge
+          echo "Attempting direct merge..."
+          merge_response=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/merges" \
+            -d '{
+              "base": "main",
+              "head": "feature-branch",
+              "commit_message": "Direct merge attempt"
+            }')
+          
+          http_code=$(echo "$merge_response" | tail -n1)
+          response_body=$(echo "$merge_response" | sed '$d')
+          
+          if [ "$http_code" = "201" ]; then
+            echo "✅ Direct merge successful"
+            
+          elif [ "$http_code" = "422" ]; then
+            echo "⚠️  Direct merge blocked (likely branch protection)"
+            echo "Creating pull request instead..."
+            
+            # Create PR with auto-merge enabled
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d '{
+                "title": "Automated PR: feature-branch → main",
+                "body": "This PR was automatically created due to branch protection rules.\n\n**Auto-merge enabled** if all checks pass.",
+                "head": "feature-branch",
+                "base": "main"
+              }')
+            
+            pr_http_code=$(echo "$pr_response" | tail -n1)
+            pr_response_body=$(echo "$pr_response" | sed '$d')
+            
+            if [ "$pr_http_code" = "201" ]; then
+              pr_number=$(echo "$pr_response_body" | jq -r '.number')
+              echo "✅ Created PR #$pr_number"
+              
+              # Enable auto-merge if available
+              echo "Enabling auto-merge..."
+              curl -s \
+                -X PUT \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${{ github.repository }}/pulls/$pr_number/merge" \
+                -d '{
+                  "merge_method": "merge",
+                  "commit_title": "Auto-merge: feature-branch → main",
+                  "commit_message": "Automatically merged via GitHub Actions"
+                }' | jq '.'
+            fi
+          fi
+
+  # Example 4: Batch merge with status checks
+  batch-merge:
+    if: github.event.inputs.merge_type == 'batch-merge'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Batch Merge with Status Checks
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Batch Merge with Status Checks ==="
+          
+          # Function to check branch status
+          check_branch_status() {
+            local branch=$1
+            echo "Checking status of $branch..."
+            
+            # Get latest commit SHA
+            commit_sha=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$branch" \
+              | jq -r '.sha')
+            
+            # Get combined status
+            status_response=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$commit_sha/status")
+            
+            state=$(echo "$status_response" | jq -r '.state')
+            echo "Status of $branch: $state"
+            
+            if [ "$state" = "success" ]; then
+              return 0
+            else
+              return 1
+            fi
+          }
+          
+          # Define branches to process
+          branches=("feature-ready-1" "feature-ready-2" "hotfix-ready")
+          
+          for branch in "${branches[@]}"; do
+            if check_branch_status "$branch"; then
+              echo "✅ $branch passed all checks, proceeding with merge..."
+              
+              curl -s \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${{ github.repository }}/merges" \
+                -d "{
+                  \"base\": \"staging\",
+                  \"head\": \"$branch\",
+                  \"commit_message\": \"Batch merge: $branch → staging (status checks passed)\"
+                }" | jq '.'
+            else
+              echo "⚠️  $branch failed status checks, skipping merge"
+            fi
+          done
+
+  # Example 5: Conditional merge based on file changes
+  conditional-merge:
+    if: github.event.inputs.merge_type == 'conditional-merge'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Conditional Merge Based on Changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Conditional Merge Based on File Changes ==="
+          
+          # Function to check if files changed
+          check_file_changes() {
+            local base_branch=$1
+            local head_branch=$2
+            local file_pattern=$3
+            
+            # Get diff between branches
+            diff_response=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/compare/$base_branch...$head_branch")
+            
+            # Check if any files match the pattern
+            files_changed=$(echo "$diff_response" | jq -r ".files[]?.filename | select(test(\"$file_pattern\"))")
+            
+            if [ -n "$files_changed" ]; then
+              echo "Files matching '$file_pattern' changed:"
+              echo "$files_changed"
+              return 0
+            else
+              echo "No files matching '$file_pattern' changed"
+              return 1
+            fi
+          }
+          
+          # Check for different file types
+          if check_file_changes "main" "feature-branch" "\\.(js|ts|jsx|tsx)$"; then
+            echo "✅ Frontend code changed, merging to staging..."
+            
+            curl -s \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/merges" \
+              -d '{
+                "base": "staging",
+                "head": "feature-branch",
+                "commit_message": "Frontend changes detected, merging to staging"
+              }' | jq '.'
+              
+          elif check_file_changes "main" "feature-branch" "\\.(py|java|cpp|c)$"; then
+            echo "✅ Backend code changed, merging to staging..."
+            
+            curl -s \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/merges" \
+              -d '{
+                "base": "staging",
+                "head": "feature-branch",
+                "commit_message": "Backend changes detected, merging to staging"
+              }' | jq '.'
+              
+          else
+            echo "ℹ️  No significant code changes detected, creating PR for review..."
+            
+            curl -s \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d '{
+                "title": "Review needed: feature-branch → staging",
+                "body": "No significant code changes detected. Please review before merging.",
+                "head": "feature-branch",
+                "base": "staging"
+              }' | jq '.'
+          fi
+
+  # Example 6: Merge with notification
+  merge-with-notification:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [simple-merge, multi-branch-merge, merge-with-protection, batch-merge, conditional-merge]
+    permissions:
+      contents: write
+    steps:
+      - name: Send Merge Notification
+        if: needs.simple-merge.result != 'skipped' || needs.multi-branch-merge.result != 'skipped' || needs.merge-with-protection.result != 'skipped' || needs.batch-merge.result != 'skipped' || needs.conditional-merge.result != 'skipped'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Merge Notification ==="
+          
+          # Create a summary of all merge operations
+          summary="## Merge Operations Summary\n\n"
+          summary+="**Triggered by:** ${{ github.actor }}\n"
+          summary+="**Workflow:** ${{ github.workflow }}\n"
+          summary+="**Repository:** ${{ github.repository }}\n\n"
+          
+          # Add results for each job
+          if [ "${{ needs.simple-merge.result }}" != "skipped" ]; then
+            summary+="- **Simple Merge:** ${{ needs.simple-merge.result }}\n"
+          fi
+          if [ "${{ needs.multi-branch-merge.result }}" != "skipped" ]; then
+            summary+="- **Multi-Branch Merge:** ${{ needs.multi-branch-merge.result }}\n"
+          fi
+          if [ "${{ needs.merge-with-protection.result }}" != "skipped" ]; then
+            summary+="- **Protected Branch Merge:** ${{ needs.merge-with-protection.result }}\n"
+          fi
+          if [ "${{ needs.batch-merge.result }}" != "skipped" ]; then
+            summary+="- **Batch Merge:** ${{ needs.batch-merge.result }}\n"
+          fi
+          if [ "${{ needs.conditional-merge.result }}" != "skipped" ]; then
+            summary+="- **Conditional Merge:** ${{ needs.conditional-merge.result }}\n"
+          fi
+          
+          # Create a gist with the summary (optional)
+          echo "Creating summary..."
+          echo "$summary"
