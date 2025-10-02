@@ -1,0 +1,381 @@
+name: Auto Create and Approve PR
+
+# Trigger on push to main branch (like sync.yml)
+on:
+  push:
+    branches:
+      - main
+  
+  # Keep manual trigger for testing/override
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch to create PR from'
+        required: true
+        default: 'feature-branch'
+      target_branch:
+        description: 'Target branch to merge into'
+        required: true
+        default: 'main'
+      pr_title:
+        description: 'PR title (optional)'
+        required: false
+      pr_body:
+        description: 'PR description (optional)'
+        required: false
+      auto_approve:
+        description: 'Auto-approve the PR'
+        required: true
+        default: true
+        type: boolean
+      auto_merge:
+        description: 'Auto-merge after approval'
+        required: true
+        default: false
+        type: boolean
+      add_reviewers:
+        description: 'Add reviewers (comma-separated usernames)'
+        required: false
+      add_labels:
+        description: 'Add labels (comma-separated)'
+        required: false
+        default: 'automated,approved'
+
+jobs:
+  create-and-approve-pr:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      statuses: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Pull Request
+        id: create-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch || 'main' }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'staging' }}
+          PR_TITLE: ${{ github.event.inputs.pr_title || '' }}
+          PR_BODY: ${{ github.event.inputs.pr_body || '' }}
+          ADD_REVIEWERS: ${{ github.event.inputs.add_reviewers || '' }}
+          ADD_LABELS: ${{ github.event.inputs.add_labels || 'automated,approved' }}
+          AUTO_APPROVE: ${{ github.event.inputs.auto_approve || 'true' }}
+          AUTO_MERGE: ${{ github.event.inputs.auto_merge || 'false' }}
+        run: |
+          echo "=== Creating Pull Request ==="
+          
+          # Set default values (main -> staging for push trigger, or manual inputs)
+          SOURCE_BRANCH=${SOURCE_BRANCH:-main}
+          TARGET_BRANCH=${TARGET_BRANCH:-staging}
+          
+          # Generate PR title if not provided
+          if [ -z "$PR_TITLE" ]; then
+            PR_TITLE="Auto PR: $SOURCE_BRANCH → $TARGET_BRANCH"
+          fi
+          
+          # Generate PR body if not provided
+          if [ -z "$PR_BODY" ]; then
+            PR_BODY="## 🤖 Automated Pull Request
+
+          This pull request was automatically created and approved by GitHub Actions.
+
+          **Source Branch:** \`$SOURCE_BRANCH\`
+          **Target Branch:** \`$TARGET_BRANCH\`
+          **Created By:** @${{ github.actor }}
+          **Workflow:** ${{ github.workflow }}
+          **Triggered:** ${{ github.event_name }}
+          **Commit:** ${{ github.sha }}
+
+          ### 📋 Changes Summary
+          - Automated sync from \`$SOURCE_BRANCH\` to \`$TARGET_BRANCH\`
+          - Triggered by push to main branch
+          - Ready for review and merge
+
+          ---
+          *This PR was created and approved automatically.*"
+          fi
+          
+          # Check if PR already exists
+          echo "Checking for existing PR..."
+          existing_pr=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:$SOURCE_BRANCH&base=$TARGET_BRANCH&state=open")
+          
+          pr_count=$(echo "$existing_pr" | jq length)
+          
+          if [ "$pr_count" -gt 0 ]; then
+            echo "ℹ️  Pull request already exists between $SOURCE_BRANCH and $TARGET_BRANCH"
+            pr_number=$(echo "$existing_pr" | jq -r '.[0].number')
+            pr_url=$(echo "$existing_pr" | jq -r '.[0].html_url')
+            echo "PR #$pr_number: $pr_url"
+            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+            echo "pr_url=$pr_url" >> $GITHUB_OUTPUT
+            echo "pr_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Creating new pull request..."
+            
+            # Build reviewers array if provided
+            reviewers_json=""
+            if [ -n "$ADD_REVIEWERS" ]; then
+              IFS=',' read -ra REVIEWER_ARRAY <<< "$ADD_REVIEWERS"
+              reviewers_json="\"reviewers\": ["
+              for i in "${!REVIEWER_ARRAY[@]}"; do
+                if [ $i -gt 0 ]; then
+                  reviewers_json+=", "
+                fi
+                reviewers_json+="\"${REVIEWER_ARRAY[i]}\""
+              done
+              reviewers_json+="],"
+            fi
+            
+            # Create PR
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d "{
+                \"title\": \"$PR_TITLE\",
+                \"body\": \"$PR_BODY\",
+                \"head\": \"$SOURCE_BRANCH\",
+                \"base\": \"$TARGET_BRANCH\",
+                $reviewers_json
+                \"draft\": false
+              }")
+            
+            pr_http_code=$(echo "$pr_response" | tail -n1)
+            pr_response_body=$(echo "$pr_response" | sed '$d')
+            
+            if [ "$pr_http_code" = "201" ]; then
+              pr_number=$(echo "$pr_response_body" | jq -r '.number')
+              pr_url=$(echo "$pr_response_body" | jq -r '.html_url')
+              echo "✅ Created PR #$pr_number: $pr_url"
+              echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+              echo "pr_url=$pr_url" >> $GITHUB_OUTPUT
+              echo "pr_exists=false" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Failed to create PR. Status: $pr_http_code"
+              echo "Response: $pr_response_body"
+              exit 1
+            fi
+          fi
+
+      - name: Add Labels to PR
+        if: steps.create-pr.outputs.pr_number
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          ADD_LABELS: ${{ github.event.inputs.add_labels || '' }}
+        run: |
+          if [ -n "$ADD_LABELS" ] && [ -n "${{ steps.create-pr.outputs.pr_number }}" ]; then
+            echo "Adding labels to PR #${{ steps.create-pr.outputs.pr_number }}..."
+            
+            # Convert comma-separated labels to JSON array
+            IFS=',' read -ra LABEL_ARRAY <<< "$ADD_LABELS"
+            labels_json="["
+            for i in "${!LABEL_ARRAY[@]}"; do
+              if [ $i -gt 0 ]; then
+                labels_json+=", "
+              fi
+              labels_json+="\"${LABEL_ARRAY[i]}\""
+            done
+            labels_json+="]"
+            
+            # Add labels
+            curl -s \
+              -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create-pr.outputs.pr_number }}/labels" \
+              -d "$labels_json" | jq '.'
+            
+            echo "✅ Added labels: $ADD_LABELS"
+          fi
+
+      - name: Auto-Approve PR
+        if: (github.event.inputs.auto_approve == 'true' || github.event_name == 'push') && steps.create-pr.outputs.pr_number
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Auto-Approving PR ==="
+          
+          # Check if PR is already approved
+          echo "Checking current approval status..."
+          reviews=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}/reviews")
+          
+          # Check if current user already approved
+          already_approved=$(echo "$reviews" | jq -r ".[] | select(.user.login == \"${{ github.actor }}\" and .state == \"APPROVED\") | .state")
+          
+          if [ "$already_approved" = "APPROVED" ]; then
+            echo "ℹ️  PR #${{ steps.create-pr.outputs.pr_number }} already approved by ${{ github.actor }}"
+          else
+            echo "Approving PR #${{ steps.create-pr.outputs.pr_number }}..."
+            
+            # Approve the PR
+            approval_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}/reviews" \
+              -d '{
+                "event": "APPROVE",
+                "body": "🤖 **Automated Approval**\n\nThis PR has been automatically approved by GitHub Actions.\n\n**Approved by:** @${{ github.actor }}\n**Workflow:** ${{ github.workflow }}\n**Triggered:** ${{ github.event_name }}"
+              }')
+            
+            approval_http_code=$(echo "$approval_response" | tail -n1)
+            approval_response_body=$(echo "$approval_response" | sed '$d')
+            
+            if [ "$approval_http_code" = "200" ]; then
+              echo "✅ Successfully approved PR #${{ steps.create-pr.outputs.pr_number }}"
+            else
+              echo "❌ Failed to approve PR. Status: $approval_http_code"
+              echo "Response: $approval_response_body"
+              exit 1
+            fi
+          fi
+
+      - name: Check PR Status and Requirements
+        if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Checking PR Status for Auto-Merge ==="
+          
+          # Get PR details
+          pr_details=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}")
+          
+          # Check mergeable status
+          mergeable=$(echo "$pr_details" | jq -r '.mergeable')
+          mergeable_state=$(echo "$pr_details" | jq -r '.mergeable_state')
+          
+          echo "PR mergeable: $mergeable"
+          echo "PR mergeable state: $mergeable_state"
+          
+          # Check if there are any failing checks
+          checks=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/check-runs")
+          
+          # Save status for next step
+          echo "mergeable=$mergeable" >> $GITHUB_ENV
+          echo "mergeable_state=$mergeable_state" >> $GITHUB_ENV
+
+      - name: Auto-Merge PR
+        if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number && env.mergeable == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Auto-Merging PR ==="
+          
+          # Wait a moment for any pending checks
+          echo "Waiting 10 seconds for any pending checks to complete..."
+          sleep 10
+          
+          # Attempt to merge the PR
+          echo "Attempting to merge PR #${{ steps.create-pr.outputs.pr_number }}..."
+          
+          merge_response=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}/merge" \
+            -d '{
+              "commit_title": "Auto-merge: ${{ github.event.inputs.source_branch }} → ${{ github.event.inputs.target_branch }}",
+              "commit_message": "Automatically merged via GitHub Actions workflow\n\n- PR #${{ steps.create-pr.outputs.pr_number }}\n- Approved by: @${{ github.actor }}\n- Workflow: ${{ github.workflow }}",
+              "merge_method": "merge"
+            }')
+          
+          merge_http_code=$(echo "$merge_response" | tail -n1)
+          merge_response_body=$(echo "$merge_response" | sed '$d')
+          
+          if [ "$merge_http_code" = "200" ]; then
+            echo "✅ Successfully merged PR #${{ steps.create-pr.outputs.pr_number }}"
+            echo "Merged commit SHA: $(echo "$merge_response_body" | jq -r '.sha')"
+          elif [ "$merge_http_code" = "405" ]; then
+            echo "⚠️  PR cannot be merged (method not allowed)"
+            echo "This usually means the PR is not in a mergeable state"
+            echo "Response: $merge_response_body"
+          elif [ "$merge_http_code" = "409" ]; then
+            echo "⚠️  Merge conflict detected"
+            echo "Response: $merge_response_body"
+          else
+            echo "❌ Failed to merge PR. Status: $merge_http_code"
+            echo "Response: $merge_response_body"
+          fi
+
+      - name: Clean Up Branch (Optional)
+        if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Cleanup: Deleting Source Branch ==="
+          
+          # Check if PR was successfully merged
+          pr_details=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}")
+          
+          merged=$(echo "$pr_details" | jq -r '.merged')
+          
+          if [ "$merged" = "true" ]; then
+            echo "PR was successfully merged, deleting source branch..."
+            
+            source_branch="${{ github.event.inputs.source_branch || 'main' }}"
+            
+            # Delete the source branch
+            delete_response=$(curl -s -w "\n%{http_code}" \
+              -X DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/git/refs/heads/$source_branch")
+            
+            delete_http_code=$(echo "$delete_response" | tail -n1)
+            
+            if [ "$delete_http_code" = "204" ]; then
+              echo "✅ Successfully deleted branch: $source_branch"
+            else
+              echo "⚠️  Could not delete branch (status: $delete_http_code)"
+            fi
+          else
+            echo "ℹ️  PR was not merged, keeping source branch"
+          fi
+
+      - name: Summary
+        if: always() && steps.create-pr.outputs.pr_number
+        run: |
+          echo "=== Workflow Summary ==="
+          echo "✅ PR #${{ steps.create-pr.outputs.pr_number }} processed"
+          echo "🔗 URL: ${{ steps.create-pr.outputs.pr_url }}"
+          echo "📝 Auto-approve: ${{ github.event.inputs.auto_approve || 'true (push trigger)' }}"
+          echo "🔄 Auto-merge: ${{ github.event.inputs.auto_merge || 'false (push trigger)' }}"
+          echo "👤 Created by: ${{ github.actor }}"
+          echo "🚀 Triggered by: ${{ github.event_name }}"
+          echo "🏷️  Labels: ${{ github.event.inputs.add_labels || 'automated,approved' }}"
+          echo "👥 Reviewers: ${{ github.event.inputs.add_reviewers || 'none' }}"
+          echo "📋 Source: ${{ github.event.inputs.source_branch || 'main' }} → Target: ${{ github.event.inputs.target_branch || 'staging' }}"

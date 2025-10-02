@@ -1,0 +1,411 @@
+name: Conditional PR Create and Approve
+
+# This workflow creates PRs and conditionally approves them based on various criteria
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch to create PR from'
+        required: true
+        default: 'feature-branch'
+      target_branch:
+        description: 'Target branch to merge into'
+        required: true
+        default: 'main'
+      approval_criteria:
+        description: 'Approval criteria'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - file-changes
+          - ci-status
+          - code-review
+          - size-based
+      max_file_changes:
+        description: 'Max file changes for auto-approval (for size-based)'
+        required: false
+        default: '10'
+      require_ci_pass:
+        description: 'Require CI to pass for approval'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  conditional-pr-approve:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      statuses: read
+      checks: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Pull Request
+        id: create-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch || 'feature-branch' }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'main' }}
+        run: |
+          echo "=== Creating Pull Request ==="
+          
+          SOURCE_BRANCH=${SOURCE_BRANCH:-feature-branch}
+          TARGET_BRANCH=${TARGET_BRANCH:-main}
+          
+          # Check if PR already exists
+          existing_pr=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:$SOURCE_BRANCH&base=$TARGET_BRANCH&state=open")
+          
+          pr_count=$(echo "$existing_pr" | jq length)
+          
+          if [ "$pr_count" -gt 0 ]; then
+            pr_number=$(echo "$existing_pr" | jq -r '.[0].number')
+            pr_url=$(echo "$existing_pr" | jq -r '.[0].html_url')
+            echo "ℹ️  Using existing PR #$pr_number: $pr_url"
+          else
+            # Create new PR
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d "{
+                \"title\": \"Conditional Auto PR: $SOURCE_BRANCH → $TARGET_BRANCH\",
+                \"body\": \"## 🤖 Conditional Automated Pull Request\n\nThis PR will be automatically approved based on the selected criteria.\n\n**Criteria:** ${{ github.event.inputs.approval_criteria }}\n**Source:** \`$SOURCE_BRANCH\`\n**Target:** \`$TARGET_BRANCH\`\n**Created by:** @${{ github.actor }}\n\n### 📋 Approval Logic\n- **Criteria:** ${{ github.event.inputs.approval_criteria }}\n- **Max file changes:** ${{ github.event.inputs.max_file_changes || 'N/A' }}\n- **Require CI pass:** ${{ github.event.inputs.require_ci_pass }}\n\n---\n*This PR will be conditionally approved based on the specified criteria.*\",
+                \"head\": \"$SOURCE_BRANCH\",
+                \"base\": \"$TARGET_BRANCH\"
+              }")
+            
+            pr_http_code=$(echo "$pr_response" | tail -n1)
+            pr_response_body=$(echo "$pr_response" | sed '$d')
+            
+            if [ "$pr_http_code" = "201" ]; then
+              pr_number=$(echo "$pr_response_body" | jq -r '.number')
+              pr_url=$(echo "$pr_response_body" | jq -r '.html_url')
+              echo "✅ Created PR #$pr_number: $pr_url"
+            else
+              echo "❌ Failed to create PR. Status: $pr_http_code"
+              exit 1
+            fi
+          fi
+          
+          echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+          echo "pr_url=$pr_url" >> $GITHUB_OUTPUT
+
+      - name: Analyze PR for Conditional Approval
+        id: analyze-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          APPROVAL_CRITERIA: ${{ github.event.inputs.approval_criteria }}
+          MAX_FILE_CHANGES: ${{ github.event.inputs.max_file_changes || '10' }}
+          REQUIRE_CI_PASS: ${{ github.event.inputs.require_ci_pass }}
+        run: |
+          echo "=== Analyzing PR for Conditional Approval ==="
+          
+          PR_NUMBER="${{ steps.create-pr.outputs.pr_number }}"
+          APPROVAL_CRITERIA="${APPROVAL_CRITERIA:-auto}"
+          MAX_FILE_CHANGES="${MAX_FILE_CHANGES:-10}"
+          REQUIRE_CI_PASS="${REQUIRE_CI_PASS:-true}"
+          
+          # Initialize approval decision
+          SHOULD_APPROVE="false"
+          APPROVAL_REASON=""
+          
+          # Get PR details
+          pr_details=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER")
+          
+          # Get PR files
+          pr_files=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/files")
+          
+          # Extract metrics
+          files_changed=$(echo "$pr_files" | jq length)
+          additions=$(echo "$pr_details" | jq '.additions')
+          deletions=$(echo "$pr_details" | jq '.deletions')
+          changed_lines=$((additions + deletions))
+          
+          echo "📊 PR Metrics:"
+          echo "  Files changed: $files_changed"
+          echo "  Lines added: $additions"
+          echo "  Lines deleted: $deletions"
+          echo "  Total changed lines: $changed_lines"
+          
+          # Check CI status if required
+          ci_status="unknown"
+          if [ "$REQUIRE_CI_PASS" = "true" ]; then
+            echo "🔍 Checking CI status..."
+            
+            # Get commit SHA
+            head_sha=$(echo "$pr_details" | jq -r '.head.sha')
+            
+            # Check commit status
+            commit_status=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$head_sha/status")
+            
+            ci_state=$(echo "$commit_status" | jq -r '.state')
+            
+            # Check check runs
+            check_runs=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$head_sha/check-runs")
+            
+            check_runs_count=$(echo "$check_runs" | jq '.check_runs | length')
+            failed_checks=$(echo "$check_runs" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+            
+            if [ "$check_runs_count" -gt 0 ]; then
+              if [ "$failed_checks" -eq 0 ]; then
+                ci_status="pass"
+              else
+                ci_status="fail"
+              fi
+            else
+              ci_status="pending"
+            fi
+            
+            echo "  CI Status: $ci_status (state: $ci_state, failed checks: $failed_checks)"
+          fi
+          
+          # Apply approval criteria
+          case "$APPROVAL_CRITERIA" in
+            "auto")
+              if [ "$REQUIRE_CI_PASS" = "true" ] && [ "$ci_status" != "pass" ]; then
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="CI must pass before auto-approval"
+              else
+                SHOULD_APPROVE="true"
+                APPROVAL_REASON="Auto-approval enabled"
+              fi
+              ;;
+              
+            "file-changes")
+              # Analyze file types
+              config_files=$(echo "$pr_files" | jq '[.[] | select(.filename | test("\\.(json|yaml|yml|toml|ini|conf)$"))] | length')
+              doc_files=$(echo "$pr_files" | jq '[.[] | select(.filename | test("\\.(md|txt|rst)$"))] | length')
+              test_files=$(echo "$pr_files" | jq '[.[] | select(.filename | test("test|spec"))] | length')
+              
+              echo "  File type analysis:"
+              echo "    Config files: $config_files"
+              echo "    Documentation: $doc_files"
+              echo "    Test files: $test_files"
+              
+              # Auto-approve if only config/docs/test changes
+              if [ "$files_changed" -le 5 ] && [ "$((config_files + doc_files + test_files))" -eq "$files_changed" ]; then
+                SHOULD_APPROVE="true"
+                APPROVAL_REASON="Only configuration, documentation, or test files changed"
+              else
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="Code changes detected, requires manual review"
+              fi
+              
+              if [ "$REQUIRE_CI_PASS" = "true" ] && [ "$ci_status" != "pass" ]; then
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="CI must pass before approval"
+              fi
+              ;;
+              
+            "size-based")
+              if [ "$files_changed" -le "$MAX_FILE_CHANGES" ] && [ "$changed_lines" -le 100 ]; then
+                SHOULD_APPROVE="true"
+                APPROVAL_REASON="Small PR (≤$MAX_FILE_CHANGES files, ≤100 lines)"
+              else
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="Large PR requires manual review ($files_changed files, $changed_lines lines)"
+              fi
+              
+              if [ "$REQUIRE_CI_PASS" = "true" ] && [ "$ci_status" != "pass" ]; then
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="CI must pass before approval"
+              fi
+              ;;
+              
+            "ci-status")
+              if [ "$ci_status" = "pass" ]; then
+                SHOULD_APPROVE="true"
+                APPROVAL_REASON="All CI checks passed"
+              else
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="CI checks must pass for approval"
+              fi
+              ;;
+              
+            "code-review")
+              # This would typically integrate with code analysis tools
+              # For now, we'll just check if it's a small, safe change
+              if [ "$files_changed" -le 3 ] && [ "$changed_lines" -le 50 ]; then
+                SHOULD_APPROVE="true"
+                APPROVAL_REASON="Small, low-risk changes"
+              else
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="Requires manual code review"
+              fi
+              
+              if [ "$REQUIRE_CI_PASS" = "true" ] && [ "$ci_status" != "pass" ]; then
+                SHOULD_APPROVE="false"
+                APPROVAL_REASON="CI must pass before approval"
+              fi
+              ;;
+              
+            *)
+              SHOULD_APPROVE="false"
+              APPROVAL_REASON="Unknown approval criteria: $APPROVAL_CRITERIA"
+              ;;
+          esac
+          
+          echo "🎯 Approval Decision: $SHOULD_APPROVE"
+          echo "📝 Reason: $APPROVAL_REASON"
+          
+          # Output results
+          echo "should_approve=$SHOULD_APPROVE" >> $GITHUB_OUTPUT
+          echo "approval_reason=$APPROVAL_REASON" >> $GITHUB_OUTPUT
+          echo "files_changed=$files_changed" >> $GITHUB_OUTPUT
+          echo "changed_lines=$changed_lines" >> $GITHUB_OUTPUT
+          echo "ci_status=$ci_status" >> $GITHUB_OUTPUT
+
+      - name: Conditional Approval
+        if: steps.analyze-pr.outputs.should_approve == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Conditional Approval ==="
+          
+          # Check if already approved
+          reviews=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}/reviews")
+          
+          already_approved=$(echo "$reviews" | jq -r ".[] | select(.user.login == \"${{ github.actor }}\" and .state == \"APPROVED\") | .state")
+          
+          if [ "$already_approved" = "APPROVED" ]; then
+            echo "ℹ️  PR already approved by ${{ github.actor }}"
+          else
+            echo "✅ Approving PR based on criteria: ${{ steps.analyze-pr.outputs.approval_reason }}"
+            
+            # Create approval comment
+            approval_body="🤖 **Conditional Automated Approval**
+
+          This PR has been automatically approved based on the following criteria:
+
+          **Criteria:** ${{ github.event.inputs.approval_criteria }}
+          **Reason:** ${{ steps.analyze-pr.outputs.approval_reason }}
+
+          **Analysis Results:**
+          - Files changed: ${{ steps.analyze-pr.outputs.files_changed }}
+          - Lines changed: ${{ steps.analyze-pr.outputs.changed_lines }}
+          - CI Status: ${{ steps.analyze-pr.outputs.ci_status }}
+
+          **Approved by:** @${{ github.actor }}
+          **Workflow:** ${{ github.workflow }}
+          **Triggered:** ${{ github.event_name }}"
+            
+            # Approve the PR
+            curl -s \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.create-pr.outputs.pr_number }}/reviews" \
+              -d "{
+                \"event\": \"APPROVE\",
+                \"body\": \"$approval_body\"
+              }" | jq '.'
+            
+            echo "✅ Successfully approved PR #${{ steps.create-pr.outputs.pr_number }}"
+          fi
+
+      - name: Add Conditional Labels
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Adding Conditional Labels ==="
+          
+          # Determine labels based on approval decision
+          if [ "${{ steps.analyze-pr.outputs.should_approve }}" = "true" ]; then
+            labels='["automated","approved","'${{ github.event.inputs.approval_criteria }}'"]'
+            echo "Adding approval labels: $labels"
+          else
+            labels='["automated","needs-review","'${{ github.event.inputs.approval_criteria }}'"]'
+            echo "Adding review labels: $labels"
+          fi
+          
+          # Add labels to PR
+          curl -s \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create-pr.outputs.pr_number }}/labels" \
+            -d "$labels" | jq '.'
+
+      - name: Add Analysis Comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          echo "=== Adding Analysis Comment ==="
+          
+          comment_body="## 🔍 Automated Analysis Results
+
+          **PR:** #${{ steps.create-pr.outputs.pr_number }}
+          **Criteria:** ${{ github.event.inputs.approval_criteria }}
+          **Decision:** ${{ steps.analyze-pr.outputs.should_approve }}
+
+          ### 📊 Metrics
+          - **Files changed:** ${{ steps.analyze-pr.outputs.files_changed }}
+          - **Lines changed:** ${{ steps.analyze-pr.outputs.changed_lines }}
+          - **CI Status:** ${{ steps.analyze-pr.outputs.ci_status }}
+
+          ### 🎯 Decision Reason
+          ${{ steps.analyze-pr.outputs.approval_reason }}
+
+          ---
+          *Analysis performed by GitHub Actions workflow*"
+          
+          # Add comment to PR
+          curl -s \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create-pr.outputs.pr_number }}/comments" \
+            -d "{
+              \"body\": \"$comment_body\"
+            }" | jq '.'
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== Conditional PR Summary ==="
+          echo "✅ PR #${{ steps.create-pr.outputs.pr_number }} processed"
+          echo "🔗 URL: ${{ steps.create-pr.outputs.pr_url }}"
+          echo "🎯 Criteria: ${{ github.event.inputs.approval_criteria }}"
+          echo "✅ Approved: ${{ steps.analyze-pr.outputs.should_approve }}"
+          echo "📝 Reason: ${{ steps.analyze-pr.outputs.approval_reason }}"
+          echo "📊 Files: ${{ steps.analyze-pr.outputs.files_changed }}, Lines: ${{ steps.analyze-pr.outputs.changed_lines }}"
+          echo "🔍 CI Status: ${{ steps.analyze-pr.outputs.ci_status }}"
