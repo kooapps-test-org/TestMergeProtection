@@ -137,6 +137,8 @@ jobs:
               done
               reviewers_json+="],"
             fi
+
+            echo "reviewers_json=$reviewers_json"
             
             # Create PR
             pr_response=$(curl -s -w "\n%{http_code}" \
