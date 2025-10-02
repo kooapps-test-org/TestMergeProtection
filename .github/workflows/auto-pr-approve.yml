@@ -66,7 +66,7 @@ jobs:
           TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'staging' }}
           PR_TITLE: ${{ github.event.inputs.pr_title || '' }}
           PR_BODY: ${{ github.event.inputs.pr_body || '' }}
-          ADD_REVIEWERS: ${{ github.event.inputs.add_reviewers || 'kooapps-fnx-bot-01' }}
+          ADD_REVIEWERS: ${{ 'kooapps-fnx-bot-01' }}
           ADD_LABELS: ${{ github.event.inputs.add_labels || 'automated,approved' }}
           AUTO_APPROVE: ${{ github.event.inputs.auto_approve || 'true' }}
           AUTO_MERGE: ${{ github.event.inputs.auto_merge || 'false' }}
