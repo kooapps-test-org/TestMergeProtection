@@ -221,7 +221,7 @@ jobs:
       - name: Auto-Approve PR
         if: (github.event.inputs.auto_approve == 'true' || github.event_name == 'push') && steps.create-pr.outputs.pr_number
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_2 }}
         run: |
           echo "=== Auto-Approving PR ==="
           
@@ -268,7 +268,7 @@ jobs:
       - name: Check PR Status and Requirements
         if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_2 }}
         run: |
           echo "=== Checking PR Status for Auto-Merge ==="
           
@@ -300,7 +300,7 @@ jobs:
       - name: Auto-Merge PR
         if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number && env.mergeable == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_2 }}
         run: |
           echo "=== Auto-Merging PR ==="
           
@@ -344,7 +344,7 @@ jobs:
       - name: Clean Up Branch (Optional)
         if: (github.event.inputs.auto_merge == 'true' || (github.event_name == 'push' && env.AUTO_MERGE == 'true')) && steps.create-pr.outputs.pr_number
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_2 }}
         run: |
           echo "=== Cleanup: Deleting Source Branch ==="
           
