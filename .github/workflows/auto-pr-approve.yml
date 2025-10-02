@@ -125,55 +125,48 @@ jobs:
           else
             echo "Creating new pull request..."
             
-            # Build reviewers array if provided
-            reviewers_json=""
-            if [ -n "$ADD_REVIEWERS" ]; then
-              IFS=',' read -ra REVIEWER_ARRAY <<< "$ADD_REVIEWERS"
-              reviewers_json="\"reviewers\": ["
-              for i in "${!REVIEWER_ARRAY[@]}"; do
-                if [ $i -gt 0 ]; then
-                  reviewers_json+=", "
-                fi
-                # Trim whitespace from reviewer name
-                reviewer=$(echo "${REVIEWER_ARRAY[i]}" | xargs)
-                reviewers_json+="\"$reviewer\""
-              done
-              reviewers_json+="]"
-            fi
-
-            echo "reviewers_json=$reviewers_json"
+            # Create PR using jq for proper JSON construction
+            echo "Creating PR with reviewers: $ADD_REVIEWERS"
             
-            # Create PR with proper JSON structure
-            if [ -n "$reviewers_json" ]; then
-              pr_response=$(curl -s -w "\n%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "https://api.github.com/repos/${{ github.repository }}/pulls" \
-                -d "{
-                  \"title\": \"$PR_TITLE\",
-                  \"body\": \"$PR_BODY\",
-                  \"head\": \"$SOURCE_BRANCH\",
-                  \"base\": \"$TARGET_BRANCH\",
-                  $reviewers_json,
-                  \"draft\": false
-                }")
+            # Build the base JSON object
+            base_json=$(jq -n \
+              --arg title "$PR_TITLE" \
+              --arg body "$PR_BODY" \
+              --arg head "$SOURCE_BRANCH" \
+              --arg base "$TARGET_BRANCH" \
+              '{
+                title: $title,
+                body: $body,
+                head: $head,
+                base: $base,
+                draft: false
+              }')
+            
+            # Add reviewers if provided
+            if [ -n "$ADD_REVIEWERS" ]; then
+              echo "Adding reviewers: $ADD_REVIEWERS"
+              # Convert comma-separated reviewers to JSON array
+              reviewers_array=$(echo "$ADD_REVIEWERS" | jq -R -s -c 'split(",") | map(select(length > 0) | gsub("^\\s+|\\s+$"; ""))')
+              echo "Reviewers array: $reviewers_array"
+              
+              # Add reviewers to the JSON
+              pr_json=$(echo "$base_json" | jq --argjson reviewers "$reviewers_array" '. + {reviewers: $reviewers}')
             else
-              pr_response=$(curl -s -w "\n%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "https://api.github.com/repos/${{ github.repository }}/pulls" \
-                -d "{
-                  \"title\": \"$PR_TITLE\",
-                  \"body\": \"$PR_BODY\",
-                  \"head\": \"$SOURCE_BRANCH\",
-                  \"base\": \"$TARGET_BRANCH\",
-                  \"draft\": false
-                }")
+              echo "No reviewers specified"
+              pr_json="$base_json"
             fi
+            
+            echo "Final JSON payload:"
+            echo "$pr_json" | jq '.'
+            
+            # Create PR
+            pr_response=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls" \
+              -d "$pr_json")
             
             pr_http_code=$(echo "$pr_response" | tail -n1)
             pr_response_body=$(echo "$pr_response" | sed '$d')
