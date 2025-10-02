@@ -36,6 +36,7 @@ on:
       add_reviewers:
         description: 'Add reviewers (comma-separated usernames)'
         required: false
+        default: 'kooapps-fnx-bot-01'
       add_labels:
         description: 'Add labels (comma-separated)'
         required: false
@@ -65,7 +66,7 @@ jobs:
           TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'staging' }}
           PR_TITLE: ${{ github.event.inputs.pr_title || '' }}
           PR_BODY: ${{ github.event.inputs.pr_body || '' }}
-          ADD_REVIEWERS: ${{ github.event.inputs.add_reviewers || '' }}
+          ADD_REVIEWERS: ${{ github.event.inputs.add_reviewers || 'kooapps-fnx-bot-01' }}
           ADD_LABELS: ${{ github.event.inputs.add_labels || 'automated,approved' }}
           AUTO_APPROVE: ${{ github.event.inputs.auto_approve || 'true' }}
           AUTO_MERGE: ${{ github.event.inputs.auto_merge || 'false' }}
@@ -379,5 +380,5 @@ jobs:
           echo "👤 Created by: ${{ github.actor }}"
           echo "🚀 Triggered by: ${{ github.event_name }}"
           echo "🏷️  Labels: ${{ github.event.inputs.add_labels || 'automated,approved' }}"
-          echo "👥 Reviewers: ${{ github.event.inputs.add_reviewers || 'none' }}"
+          echo "👥 Reviewers: ${{ github.event.inputs.add_reviewers || 'kooapps-fnx-bot-01' }}"
           echo "📋 Source: ${{ github.event.inputs.source_branch || 'main' }} → Target: ${{ github.event.inputs.target_branch || 'staging' }}"
