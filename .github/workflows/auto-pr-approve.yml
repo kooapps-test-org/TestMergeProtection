@@ -217,6 +217,7 @@ jobs:
             echo "✅ Added labels: $ADD_LABELS"
           fi
 
+
       - name: Auto-Approve PR
         if: (github.event.inputs.auto_approve == 'true' || github.event_name == 'push') && steps.create-pr.outputs.pr_number
         env:
